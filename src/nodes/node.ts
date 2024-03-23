@@ -4,6 +4,7 @@ import { BASE_NODE_PORT } from "../config";
 import { Value } from "../types";
 import { delay } from "../utils";
 
+
 export async function node(
   nodeId: number, // the ID of the node
   N: number, // total number of nodes in the network
@@ -32,10 +33,10 @@ export async function node(
     k: null
   };
 
-  let tab_x1: number[][] = []; //phase 1
+  let tab_x1: Value[][] = []; //phase 1
   tab_x1[0] = [];
 
-  let tab_x2: number[][] = []; //phase 2
+  let tab_x2: Value[][] = []; //phase 2
   tab_x2[0] = [];
 
 
@@ -124,18 +125,19 @@ export async function node(
           if (compteur_x0 > F + 1) {
             state.x = 0;
             state.decided = true;
+            state.k = k;
           } else if (compteur_x1 > F + 1) {
             state.x = 1;
             state.decided = true;
+            state.k = k;
           }
           else {
 
-            if (compteur_x0 + compteur_x1 == 0) { //aucun 0 ni 1 on choisit aléatoirement
-              state.x = Math.random() > 0.5 ? 1 : 0;
+            if (tab_x2[k].filter((value) => value !== "?").length >0) { //on a de tout
+              state.x = compteur_x1 > compteur_x0 ? 1 : 0;
             }
-            else { //pas trop compris cette partie
-              if (compteur_x1 > compteur_x0) state.x = 1;
-              else state.x = 0;
+            else { //on a que des ?
+              state.x = Math.random() < 0.5 ? 0 as Value : 1 as Value; //random pour choisir
             }
 
             //dans ce cas uniquement on continue l'algo
@@ -178,11 +180,11 @@ export async function node(
   // this route is used to start the consensus algorithm
   node.get("/start", async (req, res) => {
 
-    while(!nodesAreReady()) { //boucle infinie ?
-      await delay(50);
-    }
-
     if(!isFaulty){
+
+      while(!nodesAreReady()) { //boucle infinie ?
+        await delay(50);
+      }
 
       state.k = 1;
       state.x = initialValue;
@@ -211,7 +213,11 @@ export async function node(
 
       }
     }
-    else {
+    else { // is faulty true
+
+      state.k = null;
+      state.x = null;
+      state.decided = null;
 
       res.status(200).send("Erreur Node Faulty");
     }
