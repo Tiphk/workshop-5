@@ -1,43 +1,34 @@
 import bodyParser from "body-parser";
 import express from "express";
 import { BASE_NODE_PORT } from "../config";
-import { Value } from "../types";
+import { Value, NodeState } from "../types";
 import { delay } from "../utils";
-
+import axios from 'axios';
 
 export async function node(
-  nodeId: number, // the ID of the node
-  N: number, // total number of nodes in the network
-  F: number, // number of faulty nodes in the network
-  initialValue: Value, // initial value of the node
-  isFaulty: boolean, // true if the node is faulty, false otherwise
-  nodesAreReady: () => boolean, // used to know if all nodes are ready to receive requests
-  setNodeIsReady: (index: number) => void // this should be called when the node is started and ready to receive requests
+    nodeId: number, // the ID of the node
+    N: number, // total number of nodes in the network
+    F: number, // number of faulty nodes in the network
+    initialValue: Value, // initial value of the node
+    isFaulty: boolean, // true if the node is faulty, false otherwise
+    nodesAreReady: () => boolean, // used to know if all nodes are ready to receive requests
+    setNodeIsReady: (index: number) => void // this should be called when the node is started and ready to receive requests
 ) {
 
   const node = express();
   node.use(express.json());
   node.use(bodyParser.json());
 
-  type NodeState = {
-    killed: boolean; // this is used to know if the node was stopped by the /stop route. It's important for the unit tests but not very relevant for the Ben-Or implementation
-    x: 0 | 1 | "?" | null; // the current consensus value
-    decided: boolean | null; // used to know if the node reached finality
-    k: number | null; // current step of the node
-  };
-
   let state: NodeState = { //par défault on met ca
     killed: false,
-    x: null,
-    decided: null,
+    x: initialValue,
+    decided: false,
     k: null
   };
 
-  let tab_x1: Value[][] = []; //phase 1
-  tab_x1[0] = [];
 
-  let tab_x2: Value[][] = []; //phase 2
-  tab_x2[0] = [];
+  let tab_x1: Map<number, Value[]> = new Map();
+  let tab_x2: Map<number, Value[]> = new Map();
 
 
   // TODO implement this
@@ -61,118 +52,117 @@ export async function node(
 
   // TODO implement this
   // this route allows the node to receive messages from other nodes
-  node.post("/message", async (req, res) => {
+  node.post("/message",  (req, res) => {
     let {phase, k, x} = req.body;
 
-    if (!isFaulty && !state.killed) {
+    if(!isFaulty && !state.killed && !state.decided){
 
-      //on a reçu un message, avant tout on check si la node est faulty
-      if (phase == 1) {
+      if(phase === 1){
 
-        if (tab_x1[k] === undefined){ //au cas ou ca fait une erreur on le créé ici
-          tab_x1[k] = [];
-        }
-        tab_x1[k].push(x); //on enregistre la valeur
+        let tab_x1_K = tab_x1.get(k) ?? [];
+        tab_x1_K.push(x);
+        tab_x1.set(k, tab_x1_K);
 
-        //on vérifie si
-        if (tab_x1[k].length > (N - F)) {
+        // if the node has received N - F proposals, it should send a vote message to all other nodes
+        if(tab_x1_K.length >= N - F){
+          let occurences: Map<Value, number> = new Map();
 
-          let compteur_x0 = tab_x1[k].filter((value) => value == 0).length;
-          let compteur_x1 = tab_x1[k].filter((value) => value == 1).length;
-
-          if (compteur_x0 > N / 2) {
-            x = 0;
-          } else if (compteur_x1 > N / 2) {
-            x = 1;
-          } else {
-            x = "?";
+          for(let i = 0; i < tab_x1_K.length; i++){
+            let value = tab_x1_K[i];
+            if(occurences.has(value)){
+              occurences.set(value, (occurences.get(value) ?? 0) + 1);
+            } else {
+              occurences.set(value, 1);
+            }
           }
 
-          //on fait la partie 2
-          for (let i = 0; i < N; i++) {
-            const goTo = BASE_NODE_PORT + i;
-            const messageBody = {
-              phase: 2,
-              k: k,
-              x: x
-            };
-            const requestBody = JSON.stringify(messageBody);
+          let dominantX : Value = "?";
+          for (const [value, count] of occurences) {
+            if (count > (N / 2)) {
+              dominantX = value;
+            }
+          }
 
-            const recu = await fetch(`http://localhost:${goTo}/message`, {
-              method: 'POST', // Méthode POST
+          for(let i = 0; i < N; i++){
+            fetch(`http://localhost:${BASE_NODE_PORT + i}/message`, {
+              method: "POST",
               headers: {
-                'Content-Type': 'application/json'
+                "Content-Type": "application/json",
               },
-              body: requestBody
-            })
-
-          }
-
-        }
-
-      } else if (phase == 2) {
-
-        if (tab_x2[k] === undefined){ //au cas ou ca fait une erreur on le créé ici
-          tab_x2[k] = [];
-        }
-        tab_x2[k].push(x); //on enregistre la valeur
-
-        if (tab_x2[k].length > (N - F)) {
-
-          let compteur_x0 = tab_x2[k].filter((value) => value == 0).length;
-          let compteur_x1 = tab_x2[k].filter((value) => value == 1).length;
-
-          if (compteur_x0 > F + 1) {
-            state.x = 0;
-            state.decided = true;
-            state.k = k;
-          } else if (compteur_x1 > F + 1) {
-            state.x = 1;
-            state.decided = true;
-            state.k = k;
-          }
-          else {
-
-            if (tab_x2[k].filter((value) => value !== "?").length >0) { //on a de tout
-              state.x = compteur_x1 > compteur_x0 ? 1 : 0;
-            }
-            else { //on a que des ?
-              state.x = Math.random() < 0.5 ? 0 as Value : 1 as Value; //random pour choisir
-            }
-
-            //dans ce cas uniquement on continue l'algo
-            state.k = k + 1;
-
-            //on renvoie en partie 1
-            for (let i = 0; i < N; i++) {
-              const goTo = BASE_NODE_PORT + i;
-              const messageBody = {
-                phase: 1,
-                k: state.k,
-                x: state.x
-              };
-              const requestBody = JSON.stringify(messageBody);
-
-              const recu = await fetch(`http://localhost:${goTo}/message`, {
-                method: 'POST', // Méthode POST
-                headers: {
-                  'Content-Type': 'application/json'
-                },
-                body: requestBody
+              body: JSON.stringify({
+                phase: 2,
+                k: k,
+                x: dominantX,
               })
-
-            }
-
+            });
+          }
+        }
+      }
+      else {
+        let tab_x2_K = tab_x2.get(k) ?? [];
+        tab_x2_K.push(x);
+        tab_x2.set(k, tab_x2_K);
+        // if the node has received N - F votes, it should decide on the value
+        if (tab_x2_K.length >= N - F) {
+          let occurences: Value[] = [];
+          for (let i = 0; i < tab_x2_K.length; i++) {
+            occurences.push(tab_x2_K[i]);
           }
 
-
+          let occurences1 = occurences.filter((value) => value === 1);
+          let occurences0 = occurences.filter((value) => value === 0);
+          // Case where there is at least F + 1 votes for the same value that is not "?"
+          if (occurences1.length >= F + 1) {
+            state.x = 1;
+            state.k = k;
+            state.decided = true;
+          } else if (occurences0.length >= F + 1) {
+            state.x = 0;
+            state.k = k;
+            state.decided = true;
+          }
+          // Case where at least one value other than "?" appears one or more times
+          else if (occurences.filter((value) => value !== "?").length > 0) {
+            state.x = occurences1.length > occurences0.length ? 1 : 0;
+            state.k = k + 1;
+            for (let i = 0; i < N; i++) {
+              fetch(`http://localhost:${BASE_NODE_PORT + i}/message`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  phase: 1,
+                  k: state.k,
+                  x: state.x,
+                })
+              });
+            }
+          }
+          // Case where all values are "?", then the node increments k and chooses a random value
+          else {
+            state.k = k + 1;
+            state.x = Math.random() < 0.5 ? 0 as Value : 1 as Value;
+            for (let i = 0; i < N; i++) {
+              fetch(`http://localhost:${BASE_NODE_PORT + i}/message`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  phase: 1,
+                  k: state.k,
+                  x: state.x,
+                })
+              });
+            }
+          }
         }
-
       }
-      res.status(200).send("Message received and processed.");
-
     }
-    else res.status(500).send("Node stopped.");
+    res.status(200).send("message received");
+
+
 
   });
 
@@ -182,36 +172,27 @@ export async function node(
 
     if(!isFaulty){
 
-      while(!nodesAreReady()) { //boucle infinie ?
+      while(!nodesAreReady()) {
         await delay(50);
       }
 
       state.k = 1;
-      state.x = initialValue;
-      state.decided = false;
 
-      //setNodeIsReady(nodeId);
-
-      //on envoie un message à toutes les nodes
-      for (let i = 0; i <N; i++)
-      {
-        const goTo = BASE_NODE_PORT + i;
-        const messageBody = {
-          phase: 1,
-          k: state.k,
-          x: state.x
-        };
-        const requestBody = JSON.stringify(messageBody);
-
-        const recu = await fetch(`http://localhost:${goTo}/message`,{
-          method: 'POST', // Méthode POST
+      for (let i = 0; i < N; i++) {
+        await fetch(`http://localhost:${BASE_NODE_PORT + i}/message`, {
+          method: "POST",
           headers: {
-            'Content-Type': 'application/json'
+            "Content-Type": "application/json",
           },
-          body: requestBody
-        })
-
+          body: JSON.stringify({
+            phase: 1,
+            k: state.k,
+            x: state.x
+          })
+        });
       }
+
+
     }
     else { // is faulty true
 
@@ -219,8 +200,9 @@ export async function node(
       state.x = null;
       state.decided = null;
 
-      res.status(200).send("Erreur Node Faulty");
+      //res.status(500).send("Erreur Node Faulty");
     }
+    res.status(200).send("Start");
 
   });
 
@@ -235,9 +217,8 @@ export async function node(
   // start the server
   const server = node.listen(BASE_NODE_PORT + nodeId, async () => {
     console.log(
-      `Node ${nodeId} is listening on port ${BASE_NODE_PORT + nodeId}`
+        `Node ${nodeId} is listening on port ${BASE_NODE_PORT + nodeId}`
     );
-
     // the node is ready
     setNodeIsReady(nodeId);
   });
